@@ -11,7 +11,7 @@ import (
 	"github.com/dominikbraun/graph/draw"
 )
 
-func cleanupGraph(conn *rados.Conn, pool string, dry bool) {
+func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int) {
 	ioc, err := conn.OpenIOContext(pool)
 	if err != nil {
 		log.Fatalf("error opening pool context %v", err)
@@ -129,10 +129,29 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool) {
 				log.Fatal(err)
 			}
 			iter++
-			deleted := trimTree(graph, paths, node)
-			if len(deleted) == 0 || (len(deleted) == 1 && deleted[0].Name == node.Name) {
+			var deleted []Resource
+			var newroots []Resource
+			if maxHeight == 0 {
+				deleted = trimTree(graph, paths, node)
+			} else {
+				newroots, deleted = trimTreeWithFlatten(graph, paths, node, maxHeight)
+			}
+
+			if len(deleted) == 0 || (len(deleted) == 1 && deleted[0].Name == node.Name) && len(newroots) == 0 {
 				dirty = false
 			}
+			// break incoming edges to flattened resources to create new trees
+			for _, v := range newroots {
+				for _, p := range backPaths[v.Name] {
+					log.Printf("deleting edge %v->%v", p.Source, p.Target)
+					err = graph.RemoveEdge(p.Source, p.Target)
+					if err != nil {
+						log.Fatalf("error deleting edge %v->%v :%v", p.Source, p.Target, err)
+					}
+				}
+				roots = append(roots, v)
+			}
+
 			for _, v := range deleted {
 				for _, p := range paths[v.Name] {
 					log.Printf("deleting edge %v->%v", p.Source, p.Target)
@@ -159,7 +178,7 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool) {
 		log.Printf("Took %v generations to clean tree rooted at %v", iter, node.Name)
 	}
 	if !dry {
-		log.Println("would deleted resources in ceph now")
+		log.Println("would delete/flatten resources in ceph now")
 	}
 
 	log.Printf("Deleted the following resources: %v", cleaned)
@@ -184,6 +203,37 @@ func trimTree(g graph.Graph[string, Resource], p map[string]map[string]graph.Edg
 		}
 	}
 	return deleted
+}
+
+// example version that also flattens if it passes a height limit. I left flattening out for the first version
+// since it was supposed to be simple and idealy flattening would be caught at create time.
+// untested
+func trimTreeWithFlatten(g graph.Graph[string, Resource], p map[string]map[string]graph.Edge[string], node Resource, maxHeight int) ([]Resource, []Resource) {
+	deleted := []Resource{}
+	newroots := []Resource{}
+	s := stack[Resource]{}
+	h := stack[int]{}
+	s.Push(node)
+	h.Push(0)
+
+	for !s.Empty() {
+		cur := s.Pop()
+		height := h.Pop()
+		if height > maxHeight {
+			newroots = append(newroots, cur)
+			// don't push the children since this is becomming a seperate tree
+			continue
+		}
+		for _, v := range p[cur.Name] {
+			child, _ := g.Vertex(v.Target)
+			s.Push(child)
+			h.Push(height + 1)
+		}
+		if len(p[cur.Name]) == 0 && logicalLookupDeleted(cur) {
+			deleted = append(deleted, cur)
+		}
+	}
+	return newroots, deleted
 }
 
 // Generic stack stolen from SO
