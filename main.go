@@ -28,9 +28,14 @@ func main() {
 	pool := os.Getenv("CEPH_POOL")
 	height := os.Getenv("CEPH_MAX_HEIGHT")
 	noclean := os.Getenv("CEPH_NOCLEAN")
+	nograph := os.Getenv("CEPH_NOGRAPH")
 	clean := true
+	graph := true
 	if noclean != "" {
 		clean = false
+	}
+	if nograph != "" {
+		graph = false
 	}
 
 	var maxheight int
@@ -58,10 +63,10 @@ func main() {
 	defer conn.Shutdown()
 	log.Println("connected to ceph")
 
-	cleanupGraph(conn, pool, true, maxheight, clean)
+	cleanupGraph(conn, pool, true, maxheight, clean, graph)
 }
 
 // Stub function to represent checking if something's deleted outside of the backend
 func logicalLookupDeleted(r Resource) bool {
-	return r.Name != "snap-04303f0d801d544e6"
+	return r.Name != "img6"
 }

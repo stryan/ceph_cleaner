@@ -12,7 +12,7 @@ import (
 	"github.com/dominikbraun/graph/draw"
 )
 
-func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean bool) {
+func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean bool, makegraph bool) {
 	ioc, err := conn.OpenIOContext(pool)
 	if err != nil {
 		log.Fatalf("error opening pool context %v", err)
@@ -115,10 +115,12 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 			}
 		}
 	}
-	file, _ := os.Create("./before.gv")
-	defer func() { _ = file.Close() }()
+	if makegraph {
+		file, _ := os.Create("./before.gv")
+		defer func() { _ = file.Close() }()
 
-	_ = draw.DOT(graph, file)
+		_ = draw.DOT(graph, file)
+	}
 	if !clean {
 		return
 	}
@@ -190,9 +192,11 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 	}
 
 	log.Printf("Deleted the following resources: %v", cleaned)
-	afile, _ := os.Create("./after.gv")
-	defer func() { _ = afile.Close() }()
-	_ = draw.DOT(graph, afile)
+	if makegraph {
+		afile, _ := os.Create("./after.gv")
+		defer func() { _ = afile.Close() }()
+		_ = draw.DOT(graph, afile)
+	}
 }
 
 func trimTree(g graph.Graph[string, Resource], p map[string]map[string]graph.Edge[string], node Resource) []Resource {
