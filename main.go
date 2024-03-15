@@ -27,6 +27,12 @@ func main() {
 	keyfile := os.Getenv("CEPH_KEYRING")
 	pool := os.Getenv("CEPH_POOL")
 	height := os.Getenv("CEPH_MAX_HEIGHT")
+	noclean := os.Getenv("CEPH_NOCLEAN")
+	clean := true
+	if noclean != "" {
+		clean = false
+	}
+
 	var maxheight int
 	if height != "" {
 		var err error
@@ -52,7 +58,7 @@ func main() {
 	defer conn.Shutdown()
 	log.Println("connected to ceph")
 
-	cleanupGraph(conn, pool, true, maxheight)
+	cleanupGraph(conn, pool, true, maxheight, clean)
 }
 
 // Stub function to represent checking if something's deleted outside of the backend

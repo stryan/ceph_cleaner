@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"os"
 
@@ -11,7 +12,7 @@ import (
 	"github.com/dominikbraun/graph/draw"
 )
 
-func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int) {
+func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean bool) {
 	ioc, err := conn.OpenIOContext(pool)
 	if err != nil {
 		log.Fatalf("error opening pool context %v", err)
@@ -50,8 +51,10 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int) {
 			log.Fatalf("error listing snapshots %v", err)
 		}
 		for _, s := range snaps {
+			snapname := fmt.Sprintf("%v/%v", img.GetName(), s.Name)
+
 			err = graph.AddVertex(Resource{
-				Name:  s.Name,
+				Name:  snapname,
 				Type:  rSnap,
 				Alive: false,
 			})
@@ -81,7 +84,8 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int) {
 			log.Fatalf("error listing snapshots %v", err)
 		}
 		for _, s := range snaps {
-			err = graph.AddEdge(v, s.Name)
+			snapname := fmt.Sprintf("%v/%v", img.GetName(), s.Name)
+			err = graph.AddEdge(v, snapname)
 			if err != nil {
 				log.Fatalf("error adding image->snap relation %v", err)
 			}
@@ -103,7 +107,9 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int) {
 			if err != nil {
 				log.Fatalf("error getting parent %v", err)
 			}
-			err = graph.AddEdge(pinfo.Snap.SnapName, c)
+			snapname := fmt.Sprintf("%v/%v", pinfo.Image.ImageName, pinfo.Snap.SnapName)
+
+			err = graph.AddEdge(snapname, c)
 			if err != nil {
 				log.Fatalf("error adding edge from snapshot to child %v", err)
 			}
@@ -113,7 +119,9 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int) {
 	defer func() { _ = file.Close() }()
 
 	_ = draw.DOT(graph, file)
-
+	if !clean {
+		return
+	}
 	var cleaned []Resource
 	for _, node := range roots {
 		log.Printf("Starting cleanup for tree rooted at %v", node.Name)
