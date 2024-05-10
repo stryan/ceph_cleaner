@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/ceph/go-ceph/rados"
 	"github.com/ceph/go-ceph/rbd"
@@ -12,7 +14,13 @@ import (
 	"github.com/dominikbraun/graph/draw"
 )
 
+func TimeStamp() string {
+	ts := time.Now().UTC().Format(time.RFC3339)
+	return strings.Replace(strings.Replace(ts, ":", "", -1), "-", "", -1)
+}
+
 func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean bool, makegraph bool) {
+	prefix := fmt.Sprintf("graph-%v", TimeStamp())
 	ioc, err := conn.OpenIOContext(pool)
 	if err != nil {
 		log.Fatalf("error opening pool context %v", err)
@@ -21,7 +29,7 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 		return r.Name
 	}
 	roots := []Resource{}
-	graph := graph.New(resourceHash, graph.Directed(), graph.Acyclic())
+	forest := graph.New(resourceHash, graph.Directed(), graph.Acyclic())
 	images, err := rbd.GetImageNames(ioc)
 	if err != nil {
 		log.Fatal(err)
@@ -35,10 +43,10 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 			log.Fatalf("error opening image %v", err)
 		}
 		node := Resource{
-			Name:  v,
-			Type:  rImage,
-			Alive: true,
+			Name: v,
+			Type: rImage,
 		}
+		node.Alive = !logicalLookupDeleted(node)
 		_, err = img.GetParent()
 		if errors.Is(err, rbd.ErrNotFound) {
 			roots = append(roots, node)
@@ -52,22 +60,33 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 		}
 		for _, s := range snaps {
 			snapname := fmt.Sprintf("%v/%v", img.GetName(), s.Name)
-
-			err = graph.AddVertex(Resource{
-				Name:  snapname,
-				Type:  rSnap,
-				Alive: false,
-			})
-			if err != nil {
-				log.Fatalf("error adding snapshot vertex %v", err)
+			snapRes := Resource{
+				Name: snapname,
+				Type: rSnap,
+			}
+			snapRes.Alive = !logicalLookupDeleted(snapRes)
+			if !snapRes.Alive {
+				err = forest.AddVertex(snapRes, graph.VertexAttribute("colorscheme", "reds3"), graph.VertexAttribute("style", "filled"), graph.VertexAttribute("color", "2"), graph.VertexAttribute("fillcolor", "1"))
+				if err != nil {
+					log.Fatalf("error adding snapshot vertex %v", err)
+				}
+			} else {
+				err = forest.AddVertex(snapRes, graph.VertexAttribute("colorscheme", "greens3"), graph.VertexAttribute("style", "filled"), graph.VertexAttribute("color", "2"), graph.VertexAttribute("fillcolor", "1"))
+				if err != nil {
+					log.Fatalf("error adding snapshot vertex %v", err)
+				}
 			}
 		}
-		if len(snaps) > 0 {
-			node.Alive = true
-		}
-		err = graph.AddVertex(node)
-		if err != nil {
-			log.Fatalf("error adding image vertex %v", err)
+		if !node.Alive {
+			err = forest.AddVertex(node, graph.VertexAttribute("colorscheme", "reds3"), graph.VertexAttribute("style", "filled"), graph.VertexAttribute("color", "2"), graph.VertexAttribute("fillcolor", "1"))
+			if err != nil {
+				log.Fatalf("error adding image vertex %v", err)
+			}
+		} else {
+			err = forest.AddVertex(node, graph.VertexAttribute("colorscheme", "greens3"), graph.VertexAttribute("style", "filled"), graph.VertexAttribute("color", "2"), graph.VertexAttribute("fillcolor", "1"))
+			if err != nil {
+				log.Fatalf("error adding image vertex %v", err)
+			}
 		}
 	}
 
@@ -85,7 +104,7 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 		}
 		for _, s := range snaps {
 			snapname := fmt.Sprintf("%v/%v", img.GetName(), s.Name)
-			err = graph.AddEdge(v, snapname)
+			err = forest.AddEdge(v, snapname)
 			if err != nil {
 				log.Fatalf("error adding image->snap relation %v", err)
 			}
@@ -109,17 +128,17 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 			}
 			snapname := fmt.Sprintf("%v/%v", pinfo.Image.ImageName, pinfo.Snap.SnapName)
 
-			err = graph.AddEdge(snapname, c)
+			err = forest.AddEdge(snapname, c)
 			if err != nil {
 				log.Fatalf("error adding edge from snapshot to child %v", err)
 			}
 		}
 	}
 	if makegraph {
-		file, _ := os.Create("./before.gv")
+		file, _ := os.Create(fmt.Sprintf("graphs/%v-before.gv", prefix))
 		defer func() { _ = file.Close() }()
 
-		_ = draw.DOT(graph, file)
+		_ = draw.DOT(forest, file)
 	}
 	if !clean {
 		return
@@ -130,11 +149,11 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 		iter := 0
 		dirty := true
 		for dirty && iter < 5 {
-			paths, err := graph.AdjacencyMap()
+			paths, err := forest.AdjacencyMap()
 			if err != nil {
 				log.Fatal(err)
 			}
-			backPaths, err := graph.PredecessorMap()
+			backPaths, err := forest.PredecessorMap()
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -142,9 +161,9 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 			var deleted []Resource
 			var newroots []Resource
 			if maxHeight == 0 {
-				deleted = trimTree(graph, paths, node)
+				deleted = trimTree(forest, paths, node)
 			} else {
-				newroots, deleted = trimTreeWithFlatten(graph, paths, node, maxHeight)
+				newroots, deleted = trimTreeWithFlatten(forest, paths, node, maxHeight)
 			}
 
 			if len(deleted) == 0 || (len(deleted) == 1 && deleted[0].Name == node.Name) && len(newroots) == 0 {
@@ -154,7 +173,7 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 			for _, v := range newroots {
 				for _, p := range backPaths[v.Name] {
 					log.Printf("deleting edge %v->%v", p.Source, p.Target)
-					err = graph.RemoveEdge(p.Source, p.Target)
+					err = forest.RemoveEdge(p.Source, p.Target)
 					if err != nil {
 						log.Fatalf("error deleting edge %v->%v :%v", p.Source, p.Target, err)
 					}
@@ -165,19 +184,19 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 			for _, v := range deleted {
 				for _, p := range paths[v.Name] {
 					log.Printf("deleting edge %v->%v", p.Source, p.Target)
-					err = graph.RemoveEdge(p.Source, p.Target)
+					err = forest.RemoveEdge(p.Source, p.Target)
 					if err != nil {
 						log.Fatalf("error deleting edge %v->%v :%v", p.Source, p.Target, err)
 					}
 				}
 				for _, p := range backPaths[v.Name] {
 					log.Printf("deleting edge %v->%v", p.Source, p.Target)
-					err = graph.RemoveEdge(p.Source, p.Target)
+					err = forest.RemoveEdge(p.Source, p.Target)
 					if err != nil {
 						log.Fatalf("error deleting edge %v->%v :%v", p.Source, p.Target, err)
 					}
 				}
-				err = graph.RemoveVertex(v.Name)
+				err = forest.RemoveVertex(v.Name)
 				if err != nil {
 					log.Fatalf("error deleting vertex %v: %v", v.Name, err)
 				}
@@ -193,9 +212,10 @@ func cleanupGraph(conn *rados.Conn, pool string, dry bool, maxHeight int, clean 
 
 	log.Printf("Deleted the following resources: %v", cleaned)
 	if makegraph {
-		afile, _ := os.Create("./after.gv")
+
+		afile, _ := os.Create(fmt.Sprintf("graphs/%v-after.gv", prefix))
 		defer func() { _ = afile.Close() }()
-		_ = draw.DOT(graph, afile)
+		_ = draw.DOT(forest, afile)
 	}
 }
 

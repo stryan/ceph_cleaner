@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"slices"
 	"strconv"
 
 	"github.com/ceph/go-ceph/rados"
@@ -68,5 +69,10 @@ func main() {
 
 // Stub function to represent checking if something's deleted outside of the backend
 func logicalLookupDeleted(r Resource) bool {
-	return r.Name != "img6"
+	deleted := []string{
+		"img2",
+		"img4",
+	}
+
+	return slices.Contains(deleted, r.Name)
 }
